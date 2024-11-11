@@ -132,6 +132,6 @@ if __name__ == "__main__":
         try:
             update_dns_records(domains, secret_key, api_key)
         except Exception as e:
-            print(e)
+            logger.critical(e)
 
         time.sleep(sleep_time)
