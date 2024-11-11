@@ -46,15 +46,12 @@ def get_domain_ip(domain: str) -> str:
 
 
 def get_lan_ip() -> str:
-    try:
-        ip = requests.get("https://ipapi.co/ip/").text
-        if validate_ip(ip):
-            return ip
-        else:
-            logger.error(f"invalid lan IP ({ip})")
-            return None
-    except Exception:
+    response = requests.get("https://api.ipify.org?format=json")
+    if response.status_code == 200:
+        return response.json()["ip"]
+    else:
         return None
+
 
 
 def ping_porkbun(api_key: str, secret_key: str):

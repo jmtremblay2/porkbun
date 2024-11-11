@@ -33,7 +33,7 @@ cd /home/jm/programming/porkbun
 python3 -m venv .venv
 source .venv/bin/activate
 # install dependencies
-pip install -r requirements
+pip install -r requirements.txt
 ```
 
 create a bash script `ddns.sh` to run the ddns updater. this is for simplicity you could invoke python directly in your service definition. 
@@ -73,4 +73,10 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable porkbun_ddns
 sudo systemctl start porkbun_ddns
+```
+
+### Check that it works
+```bash
+sudo systemctl status porkbun_ddns
+journalctl -u porkbun_ddns
 ```
