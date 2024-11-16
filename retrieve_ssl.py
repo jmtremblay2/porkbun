@@ -9,6 +9,7 @@ import os
 import requests
 import sqlite3
 import time
+import sys
 from typing import Dict
 
 import systemd
@@ -16,16 +17,82 @@ import systemd
 LOG_LEVEL = os.environ.get("PORKBUN_CERT_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
 time_to_look_for_new_cert = datetime.timedelta(days=100)
-time_to_wait_when_expected = datetime.timedelta(days=1)
+one_day = 24 * 60 * 60
 
-delay_map = {
-    datetime.timedelta(
-        days=30
-    ): 10,  # check every 10 days if expires in 30 days or more
-    datetime.timedelta(days=0): 1,  # check every day if expires soon
-}
+
+class CertificateNotAvailable(Exception):
+    pass
+
+
+def get_conn(config):
+    db_path = os.path.join(config["global"]["data_path"], config["global"]["database"])
+    conn = sqlite3.connect(db_path)
+    return conn
+
+
+def parse_config():
+    CONFIG_PATH = os.environ.get("NPM_CERTS_CONFIG", "/etc/npm/certs.ini")
+    config_raw = configparser.ConfigParser()
+    config_raw.read(CONFIG_PATH)
+
+    def get_proxy_host_cert_id(cur, proxy_host):
+        # no exception check, this needs to work
+        domain_json = json.dumps([proxy_host], ensure_ascii=False)
+        stmt = """select id, certificate_id from proxy_host where domain_names = :domain_json;"""
+        cur.execute(stmt, {"domain_json": domain_json})
+        res = cur.fetchall()
+        assert (
+            len(res) == 1
+        ), f"could not find certificate for {proxy_host}. found {res}"
+        id, certificate_id = res[0]
+        return certificate_id  # proxy_host, id, certificate_id
+
+    def get_cert_domain_filepath_from_id(data_path, cert_id):
+        fullpath = os.path.join(
+            data_path, "custom_ssl", f"npm-{cert_id}", "fullchain.pem"
+        )
+        assert os.path.exists(fullpath), f"cant'f find domain cert for {cert_id}"
+        return fullpath
+
+    def get_cert_private_key_filepath_from_id(data_path, cert_id):
+        fullpath = os.path.join(
+            data_path, "custom_ssl", f"npm-{cert_id}", "privkey.pem"
+        )
+        assert os.path.exists(fullpath), f"cant'f find private key for {cert_id}"
+        return fullpath
+
+    config = {"domains": {}}
+    for section in config_raw.sections():
+        if section == "global":
+            config[section] = dict(config_raw.items(section))
+        else:
+            config["domains"][section] = dict(config_raw.items(section))
+
+    conn = get_conn(config)
+    for domain in config["domains"]:
+        d = config["domains"][domain]  # alias for simplicity
+        d["domain"] = domain
+        d["proxy_hosts"] = d["proxy_hosts"].split(",")
+
+        # all the proxy hosts in the domain should have the same certificate
+        certs = {
+            get_proxy_host_cert_id(conn.cursor(), proxy_host)
+            for proxy_host in d["proxy_hosts"]
+        }
+        assert (
+            len(certs) == 1
+        ), f"proxy hosts in section {section} have different certificates"
+        cert_id = certs.pop()
+
+        d["certificate_id"] = cert_id
+        d["domain_cert"] = get_cert_domain_filepath_from_id(
+            config["global"]["data_path"], cert_id
+        )
+        d["private_key"] = get_cert_private_key_filepath_from_id(
+            config["global"]["data_path"], cert_id
+        )
+    return config
 
 
 def get_domain_certs(config) -> Dict[str, str]:
@@ -40,26 +107,26 @@ def get_domain_certs(config) -> Dict[str, str]:
     return res.json()
 
 
-def get_host_certificate_id(cur, domain: str) -> id:
-    domain_names = [domain]
-    domain_names_json = json.dumps(domain_names, ensure_ascii=False)
-    stmt = """select certificate_id from proxy_host where domain_names = :domain_names_json;"""
-    cur.execute(stmt, {"domain_names_json": domain_names_json})
-    certificate_id = cur.fetchone()
-    if certificate_id:
-        return certificate_id[0]
-    else:
-        raise ValueError(f"could not find certificate id for domain {domain}")
+def update_certificate(cur, pb_certs: Dict[str, str], domain_config: Dict):
+    def key_to_file(key: str, path: str):
+        with open(path, "wb") as f:
+            f.write(key.encode("utf-8"))
 
+    domain_cert_tr = get_cert_time_range(domain_config["domain_cert"])
+    pb_certs_tr = get_cert_time_range(pb_certs["certificatechain"])
+    if pb_certs_tr["not_after"] <= domain_cert_tr["not_after"]:
+        raise CertificateNotAvailable(
+            f"new certificate is not newer than the current one. "
+            f"current cert expires at {domain_cert_tr['not_after']} "
+            f"new cert expires at {pb_certs_tr['not_after']}"
+        )
 
-def update_certificate(
-    cur, cert_id: int, expires_on: datetime.datetime, new_cert: Dict[str, str]
-):
-    # TODO: this is just the DB, update the files here too
+    cert_id = domain_config["certificate_id"]
+    expires_on = pb_certs_tr["not_after"]
     expires_on_str = expires_on.strftime("%Y-%m-%d %H:%M:%S")
     meta_dict = {
-        "certificate": new_cert["certificatechain"],
-        "certificate_key": new_cert["privatekey"],
+        "certificate": pb_certs["certificatechain"],
+        "certificate_key": pb_certs["privatekey"],
     }
     meta_str = json.dumps(meta_dict, separators=(",", ":"), ensure_ascii=False)
 
@@ -75,10 +142,9 @@ def update_certificate(
         {"expires_on_str": expires_on_str, "meta_str": meta_str, "cert_id": cert_id},
     )
 
-
-def key_to_file(key: str, path: str):
-    with open(path, "wb") as f:
-        f.write(key.encode("utf-8"))
+    # update the files
+    key_to_file(pb_certs["certificatechain"], domain_config["domain_cert"])
+    key_to_file(pb_certs["privatekey"], domain_config["private_key"])
 
 
 def get_cert_time_range(cert) -> Dict[str, datetime.datetime]:
@@ -95,87 +161,49 @@ def get_cert_time_range(cert) -> Dict[str, datetime.datetime]:
     return {"not_before": not_before, "not_after": not_after}
 
 
-def get_sleep_time(cert):
-    cert_time_range = get_cert_time_range(cert)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    time_until_expiration = cert_time_range["not_after"] - now
-    if time_until_expiration > time_to_look_for_new_cert:
-        delay = time_until_expiration - time_to_look_for_new_cert
-        return delay
-    else:
-        # we expected a new certificate by now but clearly it's not available
-        # wait for a default time period of one day
-        return time_to_wait_when_expected
-
-
-def cert_update_loop(conn: sqlite3.Connection, config: configparser.SectionProxy):
-    while True:
-        # find when the current certificate expires
-        domain_cert = config["domain_cert"]
-        domain_cert_tr = get_cert_time_range(domain_cert)
+def cert_update_loop(
+    config: configparser.SectionProxy,
+):
+    conn = get_conn(config)
+    nginx_service_name = config["global"]["service_name"]
+    # find when the current certificate expires
+    for domain, domain_config in config["domains"].items():
+        domain_cert_tr = get_cert_time_range(domain_config["domain_cert"])
         now = datetime.datetime.now(datetime.timezone.utc)
-
         if domain_cert_tr["not_after"] - now < time_to_look_for_new_cert:
             # start probing for a new certificate
             try:
-                pb_certs = get_domain_certs(config)
+                pb_certs = get_domain_certs(domain_config)
             except Exception as e:
                 msg = f"failed to retrieve new certificate. error:{e}"
                 logger.error(msg)
-                time.sleep(time_to_wait_when_expected.total_seconds())
                 continue
 
-            # check if the new certificate is really new
-            pb_cert_tr = get_cert_time_range(pb_certs["certificatechain"])
-            # if the new certificate has an expiration date that is different from the current one
-            # then update the current certificate
-            if True:  # new_not_after > not_after:
-                # stop the service
-                service = config["service"]
-                systemd.stop(service)
-
-                # update the certificate files
+            # attempt to update the certificate
+            try:
+                systemd.stop(nginx_service_name)
                 cur = conn.cursor()
-                cert_id = get_host_certificate_id(cur, config["domain"])
-                key_to_file(pb_certs["certificatechain"], config["domain_cert"])
-                key_to_file(pb_certs["privatekey"], config["private_key"])
-                # update nginx db entry for that certificate
-                update_certificate(
-                    cur, cert_id, expires_on=pb_cert_tr["not_after"], new_cert=pb_certs
-                )
-                cur.close()
+                update_certificate(cur, pb_certs, domain_config)
                 conn.commit()
-
-                systemd.start(service)
-
-            else:
-                # could not perform the update, does not matter we'll
-                # try again soon
-                msg = (
-                    f"could not update certificate, current cert expires at {not_after} "
-                    f"new cert expires at {new_not_after}"
-                )
+            except CertificateNotAvailable as e:
+                msg = f"could not update certificate. error:{e}"
                 logger.warning(msg)
+            except Exception as e:
+                msg = f"unexcepted error while updating certificate {e}"
+                logger.error(msg)
+            finally:
+                conn.rollback()
+                systemd.start(nginx_service_name)
+
         else:
             # nothing to do we're not due for renewal
             msg = f"not due for renewal, current cert expires at {domain_cert_tr['not_after']}"
             logger.info(msg)
 
-        sleep_time = get_sleep_time(domain_cert)
-        logger.info(f"sleeping for {sleep_time}")
-        sleep_time_seconds = sleep_time.total_seconds()
-        break
-        time.sleep(sleep_time_seconds)
-
 
 if __name__ == "__main__":
-    # get config
-    CONFIG_PATH = os.environ.get("NPM_CERTS_CONFIG", "/etc/npm/certs.ini")
-    config = configparser.ConfigParser()
-    config.read(CONFIG_PATH)
-    npm_config = config["npm_certs"]
-
-    # DB connection
-    conn = sqlite3.connect(npm_config["db"])
-
-    cert_update_loop(conn, config=npm_config)
+    config = parse_config()
+    num_iter = int(config["global"].get("num_iter", sys.maxsize))
+    for _ in range(num_iter):
+        cert_update_loop(config)
+        time.sleep(one_day)
