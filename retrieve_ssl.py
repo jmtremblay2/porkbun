@@ -8,8 +8,8 @@ import logging
 import os
 import requests
 import sqlite3
-import time
 import sys
+import time
 from typing import Dict
 
 import systemd
@@ -17,7 +17,7 @@ import systemd
 LOG_LEVEL = os.environ.get("PORKBUN_CERT_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-time_to_look_for_new_cert = datetime.timedelta(days=100)
+time_to_look_for_new_cert = datetime.timedelta(days=30)
 one_day = 24 * 60 * 60
 
 
