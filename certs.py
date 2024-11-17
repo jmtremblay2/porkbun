@@ -17,7 +17,7 @@ import systemd
 LOG_LEVEL = os.environ.get("PORKBUN_CERT_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-time_to_look_for_new_cert = datetime.timedelta(days=30)
+time_to_look_for_new_cert = datetime.timedelta(days=21)
 one_day = 24 * 60 * 60
 
 
@@ -66,6 +66,11 @@ def parse_config():
     for section in config_raw.sections():
         if section == "global":
             config[section] = dict(config_raw.items(section))
+            # debug feature to test the update certificate
+            config[section]["debug_test_update_cert"] = config[section].get("debug_test_update_cert", "false").lower() == "true"
+            if config[section]["debug_test_update_cert"]:
+                logger.warning("debug_test_update_cert is enabled, running only one iteration")
+                config[section]["num_iter"] = 1
         else:
             config["domains"][section] = dict(config_raw.items(section))
 
@@ -107,19 +112,23 @@ def get_domain_certs(config) -> Dict[str, str]:
     return res.json()
 
 
-def update_certificate(cur, pb_certs: Dict[str, str], domain_config: Dict):
-    def key_to_file(key: str, path: str):
-        with open(path, "wb") as f:
-            f.write(key.encode("utf-8"))
+def update_certificate(cur, pb_certs: Dict[str, str], domain: str, config: Dict):
+    logger.info(f"updating certificate for {domain}")
+    domain_config = config["domains"][domain]
+    debug_test_update_cert = config["global"]["debug_test_update_cert"]
 
     domain_cert_tr = get_cert_time_range(domain_config["domain_cert"])
     pb_certs_tr = get_cert_time_range(pb_certs["certificatechain"])
-    if pb_certs_tr["not_after"] <= domain_cert_tr["not_after"]:
+    new_cert_not_newer = pb_certs_tr["not_after"] <= domain_cert_tr["not_after"]
+    if new_cert_not_newer and not debug_test_update_cert:
         raise CertificateNotAvailable(
             f"new certificate is not newer than the current one. "
             f"current cert expires at {domain_cert_tr['not_after']} "
             f"new cert expires at {pb_certs_tr['not_after']}"
         )
+    else:
+        msg = f"proceeding with certificate update. old cert expires at {domain_cert_tr['not_after']} new cert expires at {pb_certs_tr['not_after']}"
+        logger.debug(msg)
 
     cert_id = domain_config["certificate_id"]
     expires_on = pb_certs_tr["not_after"]
@@ -130,6 +139,7 @@ def update_certificate(cur, pb_certs: Dict[str, str], domain_config: Dict):
     }
     meta_str = json.dumps(meta_dict, separators=(",", ":"), ensure_ascii=False)
 
+    logger.debug(f"updating certificate entry for {domain}")
     stmt = """
         update certificate 
         set 
@@ -143,8 +153,14 @@ def update_certificate(cur, pb_certs: Dict[str, str], domain_config: Dict):
     )
 
     # update the files
+    def key_to_file(key: str, path: str):
+        with open(path, "wb") as f:
+            f.write(key.encode("utf-8"))
+    logger.debug(f"updating certificate for {domain}")
     key_to_file(pb_certs["certificatechain"], domain_config["domain_cert"])
+    logger.debug(f"updating private key for {domain}")
     key_to_file(pb_certs["privatekey"], domain_config["private_key"])
+    logger.info(f"certificate updated for {domain}")
 
 
 def get_cert_time_range(cert) -> Dict[str, datetime.datetime]:
@@ -170,7 +186,9 @@ def cert_update_loop(
     for domain, domain_config in config["domains"].items():
         domain_cert_tr = get_cert_time_range(domain_config["domain_cert"])
         now = datetime.datetime.now(datetime.timezone.utc)
-        if domain_cert_tr["not_after"] - now < time_to_look_for_new_cert:
+        expires_soon = domain_cert_tr["not_after"] - now < time_to_look_for_new_cert
+        debug_test_update_cert = config["global"]["debug_test_update_cert"]
+        if expires_soon or debug_test_update_cert:
             # start probing for a new certificate
             try:
                 pb_certs = get_domain_certs(domain_config)
@@ -183,7 +201,7 @@ def cert_update_loop(
             try:
                 systemd.stop(nginx_service_name)
                 cur = conn.cursor()
-                update_certificate(cur, pb_certs, domain_config)
+                update_certificate(cur, pb_certs, domain, config)
                 conn.commit()
             except CertificateNotAvailable as e:
                 msg = f"could not update certificate. error:{e}"
@@ -204,6 +222,10 @@ def cert_update_loop(
 if __name__ == "__main__":
     config = parse_config()
     num_iter = int(config["global"].get("num_iter", sys.maxsize))
-    for _ in range(num_iter):
+    for i in range(num_iter):
         cert_update_loop(config)
-        time.sleep(one_day)
+        if i + 1 < num_iter:
+            time.sleep(one_day)
+        else:
+            # don't sleep on the last iteration
+            pass
