@@ -53,7 +53,6 @@ def get_lan_ip() -> str:
         return None
 
 
-
 def ping_porkbun(api_key: str, secret_key: str):
     url = "https://api.porkbun.com/api/json/v3/ping"
     body = {
