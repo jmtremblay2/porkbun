@@ -1,3 +1,4 @@
+import argparse
 import configparser
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -29,6 +30,10 @@ def get_conn(config):
     db_path = os.path.join(config["global"]["data_path"], config["global"]["database"])
     conn = sqlite3.connect(db_path)
     return conn
+
+
+def get_config_path():
+    pass
 
 
 def parse_config():
@@ -219,8 +224,12 @@ def cert_update_loop(
             logger.info(msg)
 
 
-if __name__ == "__main__":
+def main():
     config = parse_config()
+    import pprint
+    pprint.pprint(config)
+    return
+
     num_iter = int(config["global"].get("num_iter", sys.maxsize))
     for i in range(num_iter):
         cert_update_loop(config)
@@ -229,3 +238,16 @@ if __name__ == "__main__":
         else:
             # don't sleep on the last iteration
             pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process some integers.")
+    parser.add_argument(
+        "--npm-certs-config",
+        type=str,
+        default="/etc/npm/certs.ini",
+        help="Path to the NPM certs config file",
+    )
+    args = parser.parse_args()
+    import pprint
+    pprint.pprint(args)
+    main()
