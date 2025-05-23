@@ -5,7 +5,6 @@ import requests
 import time
 import configparser
 import re
-import dotenv
 import sys
 LOG_LEVEL = os.environ.get("PORKBUN_DDNS_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
