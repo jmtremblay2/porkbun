@@ -28,6 +28,7 @@ class CertificateNotAvailable(Exception):
 
 def get_conn(config):
     db_path = os.path.join(config["global"]["data_path"], config["global"]["database"])
+    logger.info(f"connecting to database at {db_path}")
     conn = sqlite3.connect(db_path)
     return conn
 
@@ -105,12 +106,12 @@ def parse_config():
     return config
 
 
-def get_domain_certs(config) -> Dict[str, str]:
+def get_domain_certs(global_config, config) -> Dict[str, str]:
     certs_endpoint = "https://api.porkbun.com/api/json/v3/ssl/retrieve/{domain}"
     uri = certs_endpoint.format(domain=config["domain"])
     body = {
-        "apikey": config["pb_api_key"],
-        "secretapikey": config["pb_secret_key"],
+        "apikey": global_config["pb_api_key"],
+        "secretapikey": global_config["pb_secret_key"],
     }
     res = requests.post(uri, json=body)
     res.raise_for_status()
@@ -187,6 +188,7 @@ def cert_update_loop(
 ):
     conn = get_conn(config)
     nginx_service_name = config["global"]["service_name"]
+    global_config = config["global"]
     # find when the current certificate expires
     for domain, domain_config in config["domains"].items():
         domain_cert_tr = get_cert_time_range(domain_config["domain_cert"])
@@ -196,7 +198,7 @@ def cert_update_loop(
         if expires_soon or debug_test_update_cert:
             # start probing for a new certificate
             try:
-                pb_certs = get_domain_certs(domain_config)
+                pb_certs = get_domain_certs(global_config, domain_config)
             except Exception as e:
                 msg = f"failed to retrieve new certificate. error:{e}"
                 logger.error(msg)
@@ -226,10 +228,6 @@ def cert_update_loop(
 
 def main():
     config = parse_config()
-    import pprint
-    pprint.pprint(config)
-    return
-
     num_iter = int(config["global"].get("num_iter", sys.maxsize))
     for i in range(num_iter):
         cert_update_loop(config)
@@ -248,6 +246,4 @@ if __name__ == "__main__":
         help="Path to the NPM certs config file",
     )
     args = parser.parse_args()
-    import pprint
-    pprint.pprint(args)
     main()
