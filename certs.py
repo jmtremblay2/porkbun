@@ -15,6 +15,8 @@ from typing import Dict
 
 import systemd
 
+PORKBUN_API_KEY = os.environ["PORKBUN_API_KEY"]
+PORKBUN_SECRET_KEY = os.environ["PORKBUN_SECRET_KEY"]
 LOG_LEVEL = os.environ.get("PORKBUN_CERT_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -73,9 +75,13 @@ def parse_config():
         if section == "global":
             config[section] = dict(config_raw.items(section))
             # debug feature to test the update certificate
-            config[section]["debug_test_update_cert"] = config[section].get("debug_test_update_cert", "false").lower() == "true"
+            config[section]["debug_test_update_cert"] = (
+                bool(config[section].get("debug_test_update_cert", False))
+            )
             if config[section]["debug_test_update_cert"]:
-                logger.warning("debug_test_update_cert is enabled, running only one iteration")
+                logger.warning(
+                    "debug_test_update_cert is enabled, running only one iteration"
+                )
                 config[section]["num_iter"] = 1
         else:
             config["domains"][section] = dict(config_raw.items(section))
@@ -162,6 +168,7 @@ def update_certificate(cur, pb_certs: Dict[str, str], domain: str, config: Dict)
     def key_to_file(key: str, path: str):
         with open(path, "wb") as f:
             f.write(key.encode("utf-8"))
+
     logger.debug(f"updating certificate for {domain}")
     key_to_file(pb_certs["certificatechain"], domain_config["domain_cert"])
     logger.debug(f"updating private key for {domain}")
@@ -236,6 +243,7 @@ def main():
         else:
             # don't sleep on the last iteration
             pass
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some integers.")
