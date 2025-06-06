@@ -33,15 +33,21 @@ chmod +x *.sh
 
 # configurations
 
+### Environment
+Define the following environment varibles with your porkbun API key:
+```bash
+export PORKBUN_API_KEY=pk1_XXXX
+export PORKBUN_SECRET_KEY=sk1_XXXX
+
+```
+
 ### ddns.py
 edit `/etc/porkbun/ddns.ini` with this information
 
 
 ```ini
 [porkbun_ddns]
-API_KEY=<your porkbun api key>
-SECRET_KEY=<your porkbun secret key>
-DOMAINS=<your coma separated domains/subdomains. example: maisym.com,i.maisym.com>
+DOMAINS=maisym.com,i.maisym.com,media.maisym.com,jmopines.com,test.jmopines.com
 DNS_TTL_SECONDS=600
 ```
 

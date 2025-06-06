@@ -1,3 +1,4 @@
+import argparse
 import configparser
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -14,6 +15,8 @@ from typing import Dict
 
 import systemd
 
+PORKBUN_API_KEY = os.environ["PORKBUN_API_KEY"]
+PORKBUN_SECRET_KEY = os.environ["PORKBUN_SECRET_KEY"]
 LOG_LEVEL = os.environ.get("PORKBUN_CERT_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,8 +30,13 @@ class CertificateNotAvailable(Exception):
 
 def get_conn(config):
     db_path = os.path.join(config["global"]["data_path"], config["global"]["database"])
+    logger.info(f"connecting to database at {db_path}")
     conn = sqlite3.connect(db_path)
     return conn
+
+
+def get_config_path():
+    pass
 
 
 def parse_config():
@@ -67,9 +75,13 @@ def parse_config():
         if section == "global":
             config[section] = dict(config_raw.items(section))
             # debug feature to test the update certificate
-            config[section]["debug_test_update_cert"] = config[section].get("debug_test_update_cert", "false").lower() == "true"
+            config[section]["debug_test_update_cert"] = (
+                bool(config[section].get("debug_test_update_cert", False))
+            )
             if config[section]["debug_test_update_cert"]:
-                logger.warning("debug_test_update_cert is enabled, running only one iteration")
+                logger.warning(
+                    "debug_test_update_cert is enabled, running only one iteration"
+                )
                 config[section]["num_iter"] = 1
         else:
             config["domains"][section] = dict(config_raw.items(section))
@@ -100,12 +112,12 @@ def parse_config():
     return config
 
 
-def get_domain_certs(config) -> Dict[str, str]:
+def get_domain_certs(global_config, config) -> Dict[str, str]:
     certs_endpoint = "https://api.porkbun.com/api/json/v3/ssl/retrieve/{domain}"
     uri = certs_endpoint.format(domain=config["domain"])
     body = {
-        "apikey": config["pb_api_key"],
-        "secretapikey": config["pb_secret_key"],
+        "apikey": global_config["pb_api_key"],
+        "secretapikey": global_config["pb_secret_key"],
     }
     res = requests.post(uri, json=body)
     res.raise_for_status()
@@ -156,6 +168,7 @@ def update_certificate(cur, pb_certs: Dict[str, str], domain: str, config: Dict)
     def key_to_file(key: str, path: str):
         with open(path, "wb") as f:
             f.write(key.encode("utf-8"))
+
     logger.debug(f"updating certificate for {domain}")
     key_to_file(pb_certs["certificatechain"], domain_config["domain_cert"])
     logger.debug(f"updating private key for {domain}")
@@ -182,6 +195,7 @@ def cert_update_loop(
 ):
     conn = get_conn(config)
     nginx_service_name = config["global"]["service_name"]
+    global_config = config["global"]
     # find when the current certificate expires
     for domain, domain_config in config["domains"].items():
         domain_cert_tr = get_cert_time_range(domain_config["domain_cert"])
@@ -191,7 +205,7 @@ def cert_update_loop(
         if expires_soon or debug_test_update_cert:
             # start probing for a new certificate
             try:
-                pb_certs = get_domain_certs(domain_config)
+                pb_certs = get_domain_certs(global_config, domain_config)
             except Exception as e:
                 msg = f"failed to retrieve new certificate. error:{e}"
                 logger.error(msg)
@@ -219,7 +233,7 @@ def cert_update_loop(
             logger.info(msg)
 
 
-if __name__ == "__main__":
+def main():
     config = parse_config()
     num_iter = int(config["global"].get("num_iter", sys.maxsize))
     for i in range(num_iter):
@@ -229,3 +243,15 @@ if __name__ == "__main__":
         else:
             # don't sleep on the last iteration
             pass
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process some integers.")
+    parser.add_argument(
+        "--npm-certs-config",
+        type=str,
+        default="/etc/npm/certs.ini",
+        help="Path to the NPM certs config file",
+    )
+    args = parser.parse_args()
+    main()

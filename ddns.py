@@ -5,6 +5,7 @@ import requests
 import time
 import configparser
 import re
+import sys
 
 LOG_LEVEL = os.environ.get("PORKBUN_DDNS_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -12,11 +13,22 @@ logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(mes
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = os.environ.get("PORKBUN_DDNS_CONFIG", "/etc/porkbun/ddns.ini")
+PORKBUN_API_KEY = os.environ["PORKBUN_API_KEY"]
+PORKBUN_SECRET_KEY = os.environ["PORKBUN_SECRET_KEY"]
+MAX_ITER = int(os.environ.get("PORKBUN_DDNS_MAX_ITER", 0))
+if MAX_ITER < 0:
+    MAX_ITER = sys.maxsize
 
-porkbun_edit_by_name = (
-    "https://api.porkbun.com/api/json/v3/dns/editByNameType/{domain}/A"
-)
 
+def get_update_url(domain: str) -> str:
+    tokens = domain.split(".")
+    if len(tokens) == 2:
+        url = f"https://api.porkbun.com/api/json/v3/dns/editByNameType/{domain}/A"
+    else:
+        sudbomain = ".".join(tokens[:-2])
+        domain = ".".join(tokens[-2:])
+        url = f"https://api.porkbun.com/api/json/v3/dns/editByNameType/{domain}/A/{sudbomain}"
+    return url
 
 def validate_ip(ip: str) -> bool:
     return bool(re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip))
@@ -31,7 +43,7 @@ def check_config_permissions(config_path: str = CONFIG_PATH):
 
 def get_domain_ip(domain: str) -> str:
     resolver = dns.resolver.Resolver()
-    resolver.nameservers = ["1.1.1.1"]  # cloudflare
+    resolver.nameservers = ["9.9.9.9"]
     try:
         result = resolver.resolve(domain, "A")
         for ipval in result:
@@ -41,7 +53,7 @@ def get_domain_ip(domain: str) -> str:
             else:
                 logger.error(f"invalid IP ({ip}) for {domain}")
                 return None
-    except Exception:
+    except Exception as e:
         return None
 
 
@@ -53,11 +65,11 @@ def get_lan_ip() -> str:
         return None
 
 
-def ping_porkbun(api_key: str, secret_key: str):
+def ping_porkbun():
     url = "https://api.porkbun.com/api/json/v3/ping"
     body = {
-        "secretapikey": secret_key,
-        "apikey": api_key,
+        "secretapikey": PORKBUN_SECRET_KEY,
+        "apikey": PORKBUN_API_KEY,
     }
     res = requests.post(url, json=body)
     if res:
@@ -67,70 +79,66 @@ def ping_porkbun(api_key: str, secret_key: str):
         raise Exception("Porkbun API is down")
 
 
-def update_dns_records(domains: list[str], secret_key: str, api_key: str):
+def update_dns_records(domains: list[str]):
     lan_ip = get_lan_ip()
     if not lan_ip:
         raise ConnectionError("can't figure out my own LAN IP")
 
     body = {
-        "secretapikey": secret_key,
-        "apikey": api_key,
+        "secretapikey": PORKBUN_SECRET_KEY,
+        "apikey": PORKBUN_API_KEY,
         "content": lan_ip,
+        "ttl": 600,
     }
     for domain in domains:
         domain_ip = get_domain_ip(domain)
-        logger.info(f"lan_ip={lan_ip}, domain_ip={domain_ip}")
+        logger.debug(f"lan_ip={lan_ip}, domain_ip={domain_ip}")
         if not domain_ip:
             logger.error(
                 f"can't figure out the IP of {domain}. got {domain_ip}. skipping"
             )
-        elif lan_ip != domain_ip:
+        elif (lan_ip != domain_ip):
             logger.info(
                 f"{domain}: mismatch between {lan_ip} and {domain_ip}, updating DNS record"
             )
-            url = porkbun_edit_by_name.format(domain=domain)
+            url = get_update_url(domain)
             res = requests.post(url, json=body)
-            if res:
-                logger.info(f"DNS record for {domain} updated successfully")
-                logger.debug(f"response={res.json()}")
-            else:
-                logger.error(f"update failed for {domain}. response={res.text}")
+            res.raise_for_status()
         else:
-            logger.info(f"{domain} DNS record is up to date")
+            logger.debug(f"{domain} DNS record is up to date")
 
 
-if __name__ == "__main__":
-    # check_config_permissions()
+def main():
     config = configparser.ConfigParser()
-
     # get config
     config.read(CONFIG_PATH)
     porkbun_config = config["porkbun_ddns"]
-    api_key = porkbun_config["API_KEY"]
-    secret_key = porkbun_config["SECRET_KEY"]
     domains = porkbun_config["DOMAINS"].split(",")
+    logger.info(f"domains: {domains}")
     ttl = int(porkbun_config.get("DNS_TTL_SECONDS", 600))
 
-    assert api_key, "API Key is missing, specify API_SECRET in /etc/porkbun/ddns.ini"
-    assert (
-        secret_key
-    ), "Secret Key is missing, specify SECRET_KEY in /etc/porkbun/ddns.ini"
     assert (
         domains
     ), "Domains are missing, specify DOMAINS=dom1,dom2,...,dom<n> in /etc/porkbun/ddns.ini"
 
     # maybe use this for troubleshooting but frankly it would just be restarting anyways
     # instead, we run in a loop
-    # ping_porkbun(api_key=api_key, secret_key=secret_key)
+    # ping_porkbun()
 
     logger.info("Starting ddns loop")
     sleep_time = (
         1.1 * ttl
     )  # slightly longer than TTL for updates to propagate... makes sense?
-    while True:
+    for i in range(MAX_ITER):
         try:
-            update_dns_records(domains, secret_key, api_key)
+            update_dns_records(domains)
         except Exception as e:
             logger.critical(e)
 
-        time.sleep(sleep_time)
+        last_iter = i == MAX_ITER - 1
+        if not last_iter:
+            time.sleep(sleep_time)
+
+
+if __name__ == "__main__":
+    main()
