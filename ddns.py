@@ -80,6 +80,7 @@ def ping_porkbun():
 
 
 def update_dns_records(domains: list[str]):
+    logger.debug("entering update_dns_records")
     lan_ip = get_lan_ip()
     if not lan_ip:
         raise ConnectionError("can't figure out my own LAN IP")
@@ -91,6 +92,7 @@ def update_dns_records(domains: list[str]):
         "ttl": 600,
     }
     for domain in domains:
+        logger.debug("checking domain: %s", domain)
         domain_ip = get_domain_ip(domain)
         logger.debug(f"lan_ip={lan_ip}, domain_ip={domain_ip}")
         if not domain_ip:
