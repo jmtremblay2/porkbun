@@ -15,8 +15,8 @@ from typing import Dict
 
 import systemd
 
-PORKBUN_API_KEY = os.environ["PORKBUN_API_KEY"]
-PORKBUN_SECRET_KEY = os.environ["PORKBUN_SECRET_KEY"]
+# PORKBUN_API_KEY = os.environ["PORKBUN_API_KEY"]
+# PORKBUN_SECRET_KEY = os.environ["PORKBUN_SECRET_KEY"]
 LOG_LEVEL = os.environ.get("PORKBUN_CERT_LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
